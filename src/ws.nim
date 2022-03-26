@@ -95,7 +95,11 @@ proc handshake*(ws: WebSocket, headers: HttpHeaders) {.async.} =
   await ws.tcpSocket.send(response)
   ws.readyState = Open
 
-proc newWebSocket*(
+func add*(dest, src: HttpHeaders) =
+  for k, v in src:
+    dest.add(k, v)
+
+proc newWebSocketFromRequest*(
   req: Request,
   protocol: string = ""
 ): Future[WebSocket] {.async.} =
@@ -118,16 +122,20 @@ proc newWebSocket*(
       "Failed to create WebSocket from request: " & getCurrentExceptionMsg()
     )
 
-proc newWebSocket*(
-  url: string,
-  protocols: seq[string] = @[]
-): Future[WebSocket] {.async.} =
-  ## Creates a new WebSocket connection,
-  ## protocol is optional, "" means no protocol.
+proc newWebSocket*: Websocket =
   var ws = WebSocket()
   ws.masked = true
   ws.tcpSocket = newAsyncSocket()
+  ws
 
+proc connect*(
+  ws: Websocket,
+  url: string,
+  protocols: seq[string] = @[],
+  client: AsyncHttpClient = newAsyncHttpClient(),
+) {.async.} =
+  ## Creates a new WebSocket connection,
+  ## protocol is optional, "" means no protocol.
   var uri = parseUri(url)
   var port = Port(9001)
   case uri.scheme
@@ -145,29 +153,29 @@ proc newWebSocket*(
   if uri.port.len > 0:
     port = Port(parseInt(uri.port))
 
-  var client = newAsyncHttpClient()
-
   # Generate secure key.
   var secStr = newString(16)
   for i in 0 ..< secStr.len:
     secStr[i] = char rand(255)
   let secKey = base64.encode(secStr)
 
-  client.headers = newHttpHeaders({
-    "Connection": "Upgrade",
-    "Upgrade": "websocket",
-    "Sec-WebSocket-Version": "13",
-    "Sec-WebSocket-Key": secKey,
-    # "Sec-WebSocket-Extensions": "permessage-deflate; client_max_window_bits"
-  })
+  var headers = newHttpHeaders()
+  headers &= client.headers
+  headers["Connection"] = "Upgrade"
+  headers["Upgrade"] = "websocket"
+  headers["Sec-WebSocket-Version"] = "13"
+  headers["Sec-WebSocket-Key"] = secKey
+  # headers["Sec-WebSocket-Extensions"] = "permessage-deflate; client_max_window_bits"
+
   if protocols.len > 0:
-    client.headers["Sec-WebSocket-Protocol"] = protocols.join(", ")
-  var res = await client.get($uri)
+    headers["Sec-WebSocket-Protocol"] = protocols.join(", ")
+
+  var res = await client.request(url= ($uri), httpMethod=HttpGet, headers=headers)
   let hasUpgrade = res.headers.getOrDefault("Upgrade")
   if hasUpgrade.toLowerAscii() != "websocket":
     raise newException(
       WebSocketFailedUpgradeError,
-      &"Failed to Upgrade (Possibly Connected to non-WebSocket url)"
+      fmt"Failed to Upgrade (Possibly Connected to non-WebSocket url). Upgrade: {hasUpgrade}"
     )
   if protocols.len > 0:
     var resProtocol = res.headers.getOrDefault("Sec-WebSocket-Protocol")
@@ -181,11 +189,6 @@ proc newWebSocket*(
   ws.tcpSocket = client.getSocket()
 
   ws.readyState = Open
-  return ws
-
-proc newWebSocket*(url: string, protocol: string):
-    Future[WebSocket] {.async.} =
-  return await newWebSocket(url, @[protocol])
 
 type
   Opcode* = enum
